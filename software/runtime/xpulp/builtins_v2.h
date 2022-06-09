@@ -17,7 +17,15 @@ typedef unsigned char v4u __attribute__((vector_size(4)));
 
 
 inline v2s __PACK2(int32_t x, int32_t y) {
-  return (v2s)(((uint32_t)(x) << 16) + (uint32_t)(y));
+    v2s output;
+    uint32_t imm = 1;
+    asm volatile (
+      "pv.insert.h %[z], %[x], %[imm];"
+      "pv.insert.h %[z], %[y], [0];"
+      : [z] "=r" (output) :
+      [x] "r" (x), [y] "r" (y), [imm] "I" (imm));
+    return output;
+  // return (v2s)(((uint32_t)(x) << 16) + (uint32_t)(y));
 }
 
 
