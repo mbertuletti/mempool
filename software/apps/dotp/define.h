@@ -4,8 +4,8 @@
 
 // Author: Marco Bertuletti, ETH Zurich
 
-#define LEN       (1024)
-#define N_PE      (16)
+//#define LEN       (1024)
+#define N_PE      (NUM_CORES)
 #define N_BANK    (NUM_CORES * 4)
 #define N_BANK_PE (N_PE * 4)
 
@@ -17,9 +17,9 @@
 //#define SINGLE_UNROLLED
 
 
-//#define PARALLEL
+#define PARALLEL
 //#define PARALLEL_UNROLLED
-#define PARALLEL_TRIVIAL
+//#define PARALLEL_TRIVIAL
 
 
 //#define PARALLEL_RED0
@@ -33,8 +33,8 @@
 //////////////////////////////////
 
 // Vectors for kernel computation
-int32_t vector_a[LEN] __attribute__((aligned(1024), section(".l1")));
-int32_t vector_b[LEN] __attribute__((aligned(1024), section(".l1")));
+int32_t vector_a[LEN] __attribute__((aligned(LEN), section(".l1")));
+int32_t vector_b[LEN] __attribute__((aligned(LEN), section(".l1")));
 //int32_t vector_a[LEN] __attribute__(( section(".l1")));
 //int32_t vector_b[LEN] __attribute__(( section(".l1")));
 #if defined(PARALLEL_RED0) || defined(PARALLEL_UNROLLED_RED0) || defined(PARALLEL_REDTREE) || defined(PARALLEL_UNROLLED_REDTREE)
