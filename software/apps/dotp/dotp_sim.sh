@@ -1,6 +1,6 @@
 cd /scratch2/mbertuletti/mempool/hardware
 
-for i in 64 128 256
+for i in 128 256
 do
     DEFINES+=-DLEN=$((1024 * $i)) \
     make dotp -C ../software/apps
