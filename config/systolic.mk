@@ -18,6 +18,9 @@ num_cores_per_tile ?= 4
 # Radix for hierarchical AXI interconnect
 axi_hier_radix ?= 16
 
+# Number of cores per Mempool group
+num_cores_per_group ?= 64
+
 # Number of AXI masters per group
 axi_masters_per_group ?= 1
 
