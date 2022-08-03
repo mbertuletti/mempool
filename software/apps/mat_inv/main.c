@@ -9,17 +9,17 @@
 #include "runtime.h"
 #include "synchronization.h"
 
-#define N 16
-#define M 16
-#define O 16
+#define N 64
+#define M 64
+#define O 64
 #define N_BANKS (1024)
-#define N_USED_BANKS (64)
+// #define N_USED_BANKS (64)
 
-#define VERBOSE
+// #define VERBOSE
 // #define SINGLE
 // #define PARALLEL
-#define MEMSIZED
-// #define FOLDED
+// #define MEMSIZED
+#define FOLDED
 
 #include "initialization.h"
 #include "mempool_mat_inv_q32s.h"
