@@ -18,6 +18,15 @@ module snitch
   parameter logic [31:0] MTVEC     = BootAddr, // Exception Base Address (see privileged spec 3.1.7)
   parameter bit          RVE       = 0,   // Reduced-register Extension
   parameter bit          RVM       = 1,   // Enable IntegerMmultiplication & Division Extension
+  /// Enable FP in general
+  parameter bit          FP_EN     = 0,
+  /// Enable F Extension.
+  parameter bit          RVF       = 0,
+  /// Enable D Extension.
+  parameter bit          RVD       = 0,
+  /// Enable div/sqrt unit (buggy - use with caution)
+  parameter bit          XDivSqrt  = 0,
+
   parameter int    RegNrWritePorts = 2    // Implement one or two write ports into the register file
 ) (
   input  logic          clk_i,
@@ -84,6 +93,9 @@ module snitch
   input  logic          data_pvalid_i,
   output logic          data_pready_o,
   input  logic          wake_up_sync_i, // synchronous wake-up interrupt
+  // FPU **un-timed** Side-channel
+  output fpnew_pkg::roundmode_e    fpu_rnd_mode_o,
+  input  fpnew_pkg::status_t       fpu_status_i,
   // Core event strobes
   output snitch_pkg::core_events_t core_events_o
 );
@@ -203,11 +215,20 @@ module snitch
   logic [31:0] csr_rvalue;
   logic csr_en;
 
+  typedef struct packed {
+    fpnew_pkg::roundmode_e frm;
+    fpnew_pkg::status_t    fflags;
+  } fcsr_t;
+  fcsr_t fcsr_d, fcsr_q;
+
+  assign fpu_rnd_mode_o = fcsr_q.frm;
+
   // Registers
   `FFAR(pc_q, pc_d, BootAddr, clk_i, rst_i)
   `FFAR(wfi_q, wfi_d, '0, clk_i, rst_i)
   `FFAR(wake_up_q, wake_up_d, '0, clk_i, rst_i)
   `FFAR(sb_q, sb_d, '0, clk_i, rst_i)
+  `FFAR(fcsr_q, fcsr_d, '0, clk_i, rst_i)
 
   // performance counter
   `ifdef SNITCH_ENABLE_PERF
@@ -1325,6 +1346,111 @@ module snitch
       end
 /* end of Xpulpimg extension */
 
+/* Floating-point extension */
+
+      // Offload FP-FP Instructions - fire and forget
+      // TODO (smach): Check legal rounding modes and issue illegal isn if needed
+      // Single Precision Floating-Point
+      riscv_instr::FADD_S,
+      riscv_instr::FSUB_S,
+      riscv_instr::FMUL_S,
+      riscv_instr::FDIV_S,
+      riscv_instr::FSGNJ_S,
+      riscv_instr::FSGNJN_S,
+      riscv_instr::FSGNJX_S,
+      riscv_instr::FMIN_S,
+      riscv_instr::FMAX_S,
+      riscv_instr::FSQRT_S,
+      riscv_instr::FMADD_S,
+      riscv_instr::FMSUB_S,
+      riscv_instr::FNMSUB_S,
+      riscv_instr::FNMADD_S: begin
+        if (FP_EN && RVF
+          && (!(inst_data_i inside {riscv_instr::FDIV_S, riscv_instr::FSQRT_S}) || XDivSqrt)) begin
+          write_rd = 1'b0;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Double Precision Floating-Point
+      riscv_instr::FADD_D,
+      riscv_instr::FSUB_D,
+      riscv_instr::FMUL_D,
+      riscv_instr::FDIV_D,
+      riscv_instr::FSGNJ_D,
+      riscv_instr::FSGNJN_D,
+      riscv_instr::FSGNJX_D,
+      riscv_instr::FMIN_D,
+      riscv_instr::FMAX_D,
+      riscv_instr::FSQRT_D,
+      riscv_instr::FMADD_D,
+      riscv_instr::FMSUB_D,
+      riscv_instr::FNMSUB_D,
+      riscv_instr::FNMADD_D: begin
+        if (FP_EN && RVD && (!(inst_data_i inside {riscv_instr::FDIV_D, riscv_instr::FSQRT_D}) || XDivSqrt)) begin
+          write_rd = 1'b0;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FCVT_S_D,
+      riscv_instr::FCVT_D_S: begin
+        if (FP_EN && RVF && RVD) begin
+          write_rd = 1'b0;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+
+      // Floating-Point Load/Store
+      // Single Precision Floating-Point
+      riscv_instr::FLW: begin
+        if (FP_EN && RVF) begin
+          opa_select = Reg;
+          opb_select = IImmediate;
+          write_rd = 1'b0;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FSW: begin
+        if (FP_EN && RVF) begin
+          opa_select = Reg;
+          opb_select = SFImmediate;
+          write_rd = 1'b0;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // Double Precision Floating-Point
+      riscv_instr::FLD: begin
+        if (FP_EN && RVD) begin
+          opa_select = Reg;
+          opb_select = IImmediate;
+          write_rd = 1'b0;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      riscv_instr::FSD: begin
+        if (FP_EN && RVD) begin
+          opa_select = Reg;
+          opb_select = SFImmediate;
+          write_rd = 1'b0;
+          acc_qvalid_o = valid_instr;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+/* end of Floating-point extension */
+
       // TODO(zarubaf): Illegal Instructions
       default: begin
         illegal_inst = 1'b1;
@@ -1364,6 +1490,10 @@ module snitch
     csr_rvalue = '0;
     csr_dump = 1'b0;
     csr_trace_en = 1'b0;
+    // registers
+    fcsr_d = fcsr_q;
+    if (FP_EN)
+      fcsr_d.fflags = fcsr_q.fflags | fpu_status_i;
 
     // TODO(zarubaf): Needs some more input handling, like illegal instruction exceptions.
     // Right now we skip this due to simplicity.
@@ -1390,6 +1520,25 @@ module snitch
           csr_rvalue = instret_q[63:32];
         end
         `endif
+        // F/D Extension
+        riscv_instr::CSR_FFLAGS: begin
+          if (FP_EN) begin
+            csr_rvalue = {27'b0, fcsr_q.fflags};
+            if (!exception) fcsr_d.fflags = fpnew_pkg::status_t'(alu_result[4:0]);
+          end
+        end
+        riscv_instr::CSR_FRM: begin
+          if (FP_EN) begin
+            csr_rvalue = {29'b0, fcsr_q.frm};
+            if (!exception) fcsr_d.frm = fpnew_pkg::roundmode_e'(alu_result[2:0]);
+          end
+        end
+        riscv_instr::CSR_FCSR: begin
+          if (FP_EN) begin
+            csr_rvalue = {22'b0, fcsr_q};
+            if (!exception) fcsr_d = fcsr_t'(alu_result[9:0]);
+          end
+        end
         default: begin
           csr_rvalue = '0;
           csr_dump = 1'b1;

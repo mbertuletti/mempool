@@ -9,6 +9,9 @@ module mempool_cc
   parameter logic [31:0] MTVEC      = BootAddr,
   parameter bit          RVE        = 0,  // Reduced-register extension
   parameter bit          RVM        = 1,  // Enable IntegerMmultiplication & Division Extension
+  parameter bit          FP_EN      = `ifdef FPU `FPU `else 0 `endif,
+  parameter bit          RVF        = `ifdef FPU `FPU `else 0 `endif,
+  parameter bit          RVD        = `ifdef FPU `FPU `else 0 `endif,
   parameter bit RegisterOffloadReq  = 1,
   parameter bit RegisterOffloadResp = 1,
   parameter bit RegisterTCDMReq     = 0,
@@ -61,6 +64,9 @@ module mempool_cc
     .MTVEC    ( MTVEC    ),
     .RVE      ( RVE      ),
     .RVM      ( RVM      )
+    .FP_EN    ( FP_EN    ),
+    .RVF      ( RVF      ),
+    .RVD      ( RVD      ),
   ) i_snitch (
     .clk_i                                   ,
     .rst_i                                   ,
@@ -96,7 +102,9 @@ module mempool_cc
     .data_pvalid_i    ( data_resp_q_valid   ),
     .data_pready_o    ( data_resp_q_ready   ),
     .wake_up_sync_i   ( wake_up_sync_i      ),
-    .core_events_o    ( core_events_o       )
+    .core_events_o    ( core_events_o       ),
+    .fpu_rnd_mode_o   ( /* Unused */        ),
+    .fpu_status_i     ( '0                  )
   );
 
   // Cut off-loading request path
