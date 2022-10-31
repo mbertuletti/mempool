@@ -13,7 +13,7 @@
 #define M 64
 #define O 64
 #define N_BANKS (1024)
-// #define N_USED_BANKS (64)
+#define N_USED_BANKS (64)
 
 // #define VERBOSE
 // #define SINGLE
