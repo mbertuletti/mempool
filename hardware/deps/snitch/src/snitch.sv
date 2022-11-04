@@ -4,6 +4,7 @@
 
 // Authors: Florian Zaruba <zarubaf@iis.ee.ethz.ch>
 //          Sergio Mazzola <smazzola@student.ethz.ch>
+//          Marco Bertuletti <mbertuletti@iis.ee.ethz.ch>
 // Description: Top-Level of Snitch Integer Core RV32E
 
 `include "common_cells/registers.svh"
@@ -13,11 +14,13 @@
 
 module snitch
   import snitch_pkg::meta_id_t;
+  import snitch_pkg::acc_addr_e;
 #(
   parameter logic [31:0] BootAddr  = 32'h0000_1000,
   parameter logic [31:0] MTVEC     = BootAddr, // Exception Base Address (see privileged spec 3.1.7)
   parameter bit          RVE       = 0,   // Reduced-register Extension
   parameter bit          RVM       = 1,   // Enable IntegerMmultiplication & Division Extension
+  parameter bit          ZFINX_RV  = 1,   // (mbertuletti)
   parameter int    RegNrWritePorts = 2    // Implement one or two write ports into the register file
 ) (
   input  logic          clk_i,
@@ -54,7 +57,7 @@ module snitch
   /// Independent channels for transaction request and read completion.
   /// AXI-like handshaking.
   /// Same IDs need to be handled in-order.
-  output logic [31:0]   acc_qaddr_o,
+  output acc_addr_e     acc_qaddr_o,
   output logic [4:0]    acc_qid_o,
   output logic [31:0]   acc_qdata_op_o,
   output logic [31:0]   acc_qdata_arga_o,
@@ -89,7 +92,7 @@ module snitch
 );
 
   localparam int RegWidth = RVE ? 4 : 5;
-  localparam int RegNrReadPorts = snitch_pkg::XPULPIMG ? 3 : 2;
+  localparam int RegNrReadPorts = ((snitch_pkg::XPULPIMG) || (ZFINX_RV)) ? 3 : 2;
   localparam logic [RegWidth-1:0] SP = 2;
   localparam int OutstandingWfi = 8;
 
@@ -114,11 +117,11 @@ module snitch
   assign pbimm = $signed(inst_data_i[24:20]); // Xpulpimg immediate branching signed immediate
   /* verilator lint_on WIDTH */
 
-  logic [31:0] opa, opb;
+  logic [31:0] opa, opb, opc;
   logic [32:0] adder_result;
   logic [31:0] alu_result;
 
-  logic [RegWidth-1:0] rd, rs1, rs2;
+  logic [RegWidth-1:0] rd, rs1, rs2, rs3;
   logic stall, lsu_stall;
   // Register connections
   logic [RegNrReadPorts-1:0][RegWidth-1:0]  gpr_raddr;
@@ -220,7 +223,6 @@ module snitch
   // register int destination in scoreboard
   logic  acc_register_rd;
 
-  assign acc_qaddr_o = hart_id_i;
   assign acc_qid_o = rd;
   assign acc_qdata_op_o = inst_data_i;
   assign acc_qdata_arga_o = {{32{gpr_rdata[0][31]}}, gpr_rdata[0]};
@@ -251,8 +253,9 @@ module snitch
   // TODO(zarubaf): This can probably be described a bit more efficient
   assign opa_ready = (opa_select != Reg) | ~sb_q[rs1];
   assign opb_ready = ((opb_select != Reg & opb_select != SImmediate) | ~sb_q[rs2]) & ((opb_select != RegRd) | ~sb_q[rd]);
-  assign opc_ready = ((opc_select != Reg) | ~sb_q[rd]) & ((opc_select != RegRs2) | ~sb_q[rs2]);
+  assign opc_ready = ((opc_select != Reg & opc_select != SImmediate) | ~sb_q[rs3]) & ((opc_select != RegRs2) | ~sb_q[rs2]);
   assign operands_ready = opa_ready & opb_ready & opc_ready;
+
   // either we are not using the destination register or we need to make
   // sure that its destination operand is not marked busy in the scoreboard.
   assign dstrd_ready = ~uses_rd | (uses_rd & ~sb_q[rd]);
@@ -308,6 +311,7 @@ module snitch
   assign rd = inst_data_i[7 + RegWidth - 1:7];
   assign rs1 = inst_data_i[15 + RegWidth - 1:15];
   assign rs2 = inst_data_i[20 + RegWidth - 1:20];
+  assign rs3 = ((acc_qaddr_o == snitch_pkg::ZFINX_FPU) & (snitch_pkg::ZFINX_RV)) ? inst_data_i[31:27] : (((acc_qaddr_o == snitch_pkg::XPULP_IPU) & (snitch_pkg::XPULPIMG)) ? inst_data_i[7 + RegWidth - 1:7] : '0);
 
   always_comb begin
     illegal_inst = 1'b0;
@@ -341,6 +345,7 @@ module snitch
     ls_amo = AMONone;
 
     acc_qvalid_o = 1'b0;
+    acc_qaddr_o = snitch_pkg::ZFINX_FPU;
     acc_register_rd = 1'b0;
 
     csr_en = 1'b0;
@@ -797,8 +802,61 @@ module snitch
         opa_select = Reg;
         opb_select = Reg;
         acc_register_rd = 1'b1;
+        acc_qaddr_o = snitch_pkg::XPULP_IPU;
       end
-
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/* Zfinx_rv extension */
+      // Single precision Floating-Point
+      riscv_instr::FADD_S,
+      riscv_instr::FSUB_S,
+      riscv_instr::FMUL_S,
+      riscv_instr::FDIV_S,
+      riscv_instr::FSGNJ_S,
+      riscv_instr::FSGNJN_S,
+      riscv_instr::FSGNJX_S,
+      riscv_instr::FMIN_S,
+      riscv_instr::FMAX_S,
+      riscv_instr::FSQRT_S,
+      riscv_instr::FMADD_S,
+      riscv_instr::FMSUB_S,
+      riscv_instr::FNMSUB_S,
+      riscv_instr::FNMADD_S: begin
+        if (snitch_pkg::ZFINX_RV) begin
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          acc_qvalid_o = valid_instr;
+          opa_select = Reg;
+          opb_select = Reg;
+          opc_select = Reg;
+          acc_register_rd = 1'b1;
+          acc_qaddr_o = snitch_pkg::ZFINX_FPU;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+      // Offload FP-Int Instructions - fire and forget
+      // Single Precision Floating-Point
+      riscv_instr::FLE_S,
+      riscv_instr::FLT_S,
+      riscv_instr::FEQ_S,
+      riscv_instr::FCLASS_S,
+      riscv_instr::FCVT_W_S,
+      riscv_instr::FCVT_WU_S,
+      riscv_instr::FMV_X_W: begin
+        if (snitch_pkg::ZFINX_RV) begin
+          write_rd = 1'b0;
+          uses_rd = 1'b1;
+          acc_qvalid_o = valid_instr;
+          opa_select = Reg;
+          opb_select = Reg;
+          opc_select = Reg;
+          acc_register_rd = 1'b1;
+          acc_qaddr_o = snitch_pkg::ZFINX_FPU;
+        end else begin
+          illegal_inst = 1'b1;
+        end
+      end
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /* Xpulpimg extension */
       // Post-increment loads/stores
       riscv_instr::P_LB_IRPOST: begin // Xpulpimg: p.lb rd,iimm(rs1!)
@@ -811,6 +869,7 @@ module snitch
           is_signed = 1'b1;
           opa_select = Reg;
           opb_select = IImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -824,6 +883,7 @@ module snitch
           is_postincr = 1'b1;
           opa_select = Reg;
           opb_select = IImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -839,6 +899,7 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = IImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -853,6 +914,7 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = IImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -868,6 +930,7 @@ module snitch
           ls_size = Word;
           opa_select = Reg;
           opb_select = IImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -882,6 +945,7 @@ module snitch
           is_signed = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -895,6 +959,7 @@ module snitch
           is_postincr = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -910,6 +975,7 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -924,6 +990,7 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -939,6 +1006,7 @@ module snitch
           ls_size = Word;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -951,6 +1019,7 @@ module snitch
           is_signed = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -962,6 +1031,7 @@ module snitch
           is_load = 1'b1;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -975,6 +1045,7 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -987,6 +1058,7 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1000,6 +1072,7 @@ module snitch
           ls_size = Word;
           opa_select = Reg;
           opb_select = Reg;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1012,6 +1085,7 @@ module snitch
           is_postincr = 1'b1;
           opa_select = Reg;
           opb_select = SImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1025,6 +1099,7 @@ module snitch
           ls_size = HalfWord;
           opa_select = Reg;
           opb_select = SImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1038,6 +1113,7 @@ module snitch
           ls_size = Word;
           opa_select = Reg;
           opb_select = SImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1055,6 +1131,7 @@ module snitch
           opa_select = Reg; // rs1 base address
           opb_select = RegRd; // rs3 (i.e. rd) offset
           opc_select = RegRs2; // rs2 source data
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1069,6 +1146,7 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1083,6 +1161,7 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1094,6 +1173,7 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1106,6 +1186,7 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1118,6 +1199,7 @@ module snitch
           opa_select = Reg;
           opb_select = RegRd;
           opc_select = RegRs2;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1130,6 +1212,7 @@ module snitch
           alu_op = Eq;
           opa_select = Reg;
           opb_select = PBImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1141,6 +1224,7 @@ module snitch
           alu_op = Neq;
           opa_select = Reg;
           opb_select = PBImmediate;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1200,6 +1284,7 @@ module snitch
           acc_qvalid_o = valid_instr;
           opa_select = Reg;
           acc_register_rd = 1'b1;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1288,6 +1373,7 @@ module snitch
           opa_select = Reg;
           opb_select = Reg;
           acc_register_rd = 1'b1;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1308,6 +1394,7 @@ module snitch
           opa_select = Reg;
           opc_select = Reg;
           acc_register_rd = 1'b1;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1339,6 +1426,7 @@ module snitch
           opb_select = Reg;
           opc_select = Reg;
           acc_register_rd = 1'b1;
+          acc_qaddr_o = snitch_pkg::XPULP_IPU;
         end else begin
           illegal_inst = 1'b1;
         end
@@ -1492,11 +1580,23 @@ module snitch
     endcase
   end
 
+  if ((snitch_pkg::ZFINX_RV) | (snitch_pkg::XPULPIMG)) begin
+    always_comb begin
+      unique case (opc_select)
+        None: opc = '0;
+        Reg: opc = gpr_rdata[2];
+        IImmediate: opc = iimm;
+        SFImmediate, SImmediate: opc = simm;
+        default: opc = '0;
+      endcase
+    end
+  end
+
   assign gpr_raddr[0] = rs1;
   assign gpr_raddr[1] = rs2;
   // connect third read port only if present
   if (RegNrReadPorts >= 3) begin : gpr_raddr_2
-    assign gpr_raddr[2] = rd;
+    assign gpr_raddr[2] = ((snitch_pkg::ZFINX_RV) || (snitch_pkg::XPULPIMG)) ? rs3 : '0;
   end
 
   // --------------------
