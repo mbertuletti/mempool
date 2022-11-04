@@ -65,6 +65,3 @@ xqueue_size ?= 0
 
 # Enable the XpulpIMG extension
 xpulpimg ?= 1
-
-# FPU is deactivated by default
-fpu ?= 0

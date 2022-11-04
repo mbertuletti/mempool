@@ -116,8 +116,7 @@ module mempool_tile
 
     if (!TrafficGeneration) begin: gen_mempool_cc
       mempool_cc #(
-        .BootAddr (BootAddr),
-        .NumTCDMConn (2)
+        .BootAddr (BootAddr)
       ) riscv_core (
         .clk_i         (clk_i                                                    ),
         .rst_i         (!rst_ni                                                  ),

@@ -4,20 +4,15 @@
 
 module mempool_cc
   import snitch_pkg::meta_id_t;
-  import fpnew_pkg::*;
 #(
   parameter logic [31:0] BootAddr   = 32'h0000_1000,
   parameter logic [31:0] MTVEC      = BootAddr,
   parameter bit          RVE        = 0,  // Reduced-register extension
   parameter bit          RVM        = 1,  // Enable IntegerMmultiplication & Division Extension
-  parameter bit          FP_EN      = `ifdef FPU `FPU `else 0 `endif,
-  parameter bit          RVF        = `ifdef FPU `FPU `else 0 `endif,
-  parameter bit          RVD        = `ifdef FPU `FPU `else 0 `endif,
   parameter bit RegisterOffloadReq  = 1,
   parameter bit RegisterOffloadResp = 1,
   parameter bit RegisterTCDMReq     = 0,
-  parameter bit RegisterTCDMResp    = 0,
-  parameter int NumTCDMConn         = 2
+  parameter bit RegisterTCDMResp    = 0
 ) (
   input  logic               clk_i,
   input  logic               rst_i,
@@ -28,108 +23,81 @@ module mempool_cc
   output logic               inst_valid_o,
   input  logic               inst_ready_i,
   // TCDM Ports
-  output logic     [NumTCDMConn-1:0][31:0] data_qaddr_o,
-  output logic     [NumTCDMConn-1:0]       data_qwrite_o,
-  output logic     [NumTCDMConn-1:0][3:0]  data_qamo_o,
-  output logic     [NumTCDMConn-1:0][31:0] data_qdata_o,
-  output logic     [NumTCDMConn-1:0][3:0]  data_qstrb_o,
-  output meta_id_t [NumTCDMConn-1:0]       data_qid_o,
-  output logic     [NumTCDMConn-1:0]       data_qvalid_o,
-  input  logic     [NumTCDMConn-1:0]       data_qready_i,
-  input  logic     [NumTCDMConn-1:0][31:0] data_pdata_i,
-  input  logic     [NumTCDMConn-1:0]       data_perror_i,
-  input  meta_id_t [NumTCDMConn-1:0]       data_pid_i,
-  input  logic     [NumTCDMConn-1:0]       data_pvalid_i,
-  output logic     [NumTCDMConn-1:0]       data_pready_o,
-  input  logic                             wake_up_sync_i,
+  output logic [31:0]        data_qaddr_o,
+  output logic               data_qwrite_o,
+  output logic [3:0]         data_qamo_o,
+  output logic [31:0]        data_qdata_o,
+  output logic [3:0]         data_qstrb_o,
+  output meta_id_t           data_qid_o,
+  output logic               data_qvalid_o,
+  input  logic               data_qready_i,
+  input  logic [31:0]        data_pdata_i,
+  input  logic               data_perror_i,
+  input  meta_id_t           data_pid_i,
+  input  logic               data_pvalid_i,
+  output logic               data_pready_o,
+  input  logic               wake_up_sync_i,
   // Core event strobes
   output snitch_pkg::core_events_t core_events_o
 );
 
   // Data port signals
-  snitch_pkg::dreq_t  data_req_fpu_d, data_req_fpu_q;
-  snitch_pkg::dresp_t data_resp_fpu_d, data_resp_fpu_q;
-  snitch_pkg::dreq_t  data_req_snitch_d, data_req_snitch_q;
-  snitch_pkg::dresp_t data_resp_snitch_d, data_resp_snitch_q;
+  snitch_pkg::dreq_t  data_req_d, data_req_q;
+  snitch_pkg::dresp_t data_resp_d, data_resp_q;
 
-  snitch_pkg::dreq_t [NumTCDMConn-1:0]  data_req_d, data_req_q;
-  snitch_pkg::dresp_t [NumTCDMConn-1:0] data_resp_d, data_resp_q;
-
-  logic data_req_fpu_d_valid, data_req_fpu_d_ready, data_resp_fpu_d_valid, data_resp_fpu_d_ready;
-  logic data_req_fpu_q_valid, data_req_fpu_q_ready, data_resp_fpu_q_valid, data_resp_fpu_q_ready;
-  logic data_req_snitch_d_valid, data_req_snitch_d_ready, data_resp_snitch_d_valid, data_resp_snitch_d_ready;
-  logic data_req_snitch_q_valid, data_req_snitch_q_ready, data_resp_snitch_q_valid, data_resp_snitch_q_ready;
-
-  logic [NumTCDMConn-1:0] data_req_d_valid, data_req_d_ready, data_resp_d_valid, data_resp_d_ready;
-  logic [NumTCDMConn-1:0] data_req_q_valid, data_req_q_ready, data_resp_q_valid, data_resp_q_ready;
+  logic data_req_d_valid, data_req_d_ready, data_resp_d_valid, data_resp_d_ready;
+  logic data_req_q_valid, data_req_q_ready, data_resp_q_valid, data_resp_q_ready;
 
   // Accelerator signals
   snitch_pkg::acc_req_t  acc_req_d,  acc_req_q;
   snitch_pkg::acc_resp_t acc_resp_d, acc_resp_q;
-  snitch_pkg::acc_resp_t ipu_resp, fpu_seq;
 
   logic acc_req_d_valid, acc_req_d_ready, acc_resp_d_valid, acc_resp_d_ready;
   logic acc_req_q_valid, acc_req_q_ready, acc_resp_q_valid, acc_resp_q_ready;
-
-  logic ipu_dvalid, ipu_dready, fpu_dvalid, fpu_dready;
-  logic ipu_qvalid, ipu_qready, fpu_qvalid, fpu_qready;
 
   // Snitch Integer Core
   snitch #(
     .BootAddr ( BootAddr ),
     .MTVEC    ( MTVEC    ),
-    .RVE      ( RVE            ),
-    .RVM      ( RVM            ),
-    .FP_EN    ( FP_EN          ),
-    .RVF      ( RVF            ),
-    .RVD      ( RVD            )
+    .RVE      ( RVE      ),
+    .RVM      ( RVM      )
   ) i_snitch (
-    .clk_i                                         ,
-    .rst_i                                         ,
-    .hart_id_i                                     ,
-    .inst_addr_o                                   ,
-    .inst_data_i                                   ,
-    .inst_valid_o                                  ,
-    .inst_ready_i                                  ,
-    .acc_qaddr_o            ( acc_req_d.addr      ),
-    .acc_qid_o              ( acc_req_d.id        ),
-    .acc_qdata_op_o         ( acc_req_d.data_op   ),
-    .acc_qdata_arga_o       ( acc_req_d.data_arga ),
-    .acc_qdata_argb_o       ( acc_req_d.data_argb ),
-    .acc_qdata_argc_o       ( acc_req_d.data_argc ),
-    .acc_qvalid_o           ( acc_req_d_valid     ),
-    .acc_qready_i           ( acc_req_d_ready     ),
-    .acc_pdata_i            ( acc_resp_q.data     ),
-    .acc_pid_i              ( acc_resp_q.id       ),
-    .acc_perror_i           ( acc_resp_q.error    ),
-    .acc_pvalid_i           ( acc_resp_q_valid    ),
-    .acc_pready_o           ( acc_resp_q_ready    ),
-    .data_qaddr_o           ( data_req_snitch_d.addr   ),
-    .data_qwrite_o          ( data_req_snitch_d.write  ),
-    .data_qamo_o            ( data_req_snitch_d.amo    ),
-    .data_qdata_o           ( data_req_snitch_d.data   ),
-    .data_qstrb_o           ( data_req_snitch_d.strb   ),
-    .data_qid_o             ( data_req_snitch_d.id     ),
-    .data_qvalid_o          ( data_req_snitch_d_valid  ),
-    .data_qready_i          ( data_req_snitch_d_ready  ),
-    .data_pdata_i           ( data_resp_snitch_q.data  ),
-    .data_perror_i          ( data_resp_snitch_q.error ),
-    .data_pid_i             ( data_resp_snitch_q.id    ),
-    .data_pvalid_i          ( data_resp_snitch_q_valid ),
-    .data_pready_o          ( data_resp_snitch_q_ready ),
-    .wake_up_sync_i         ( wake_up_sync_i      ),
-    .core_events_o          ( core_events_o       ),
-    .fpu_rnd_mode_o         ( /* Unused */        ),
-    .fpu_status_i           ( '0                  )
+    .clk_i                                   ,
+    .rst_i                                   ,
+    .hart_id_i                               ,
+    .inst_addr_o                             ,
+    .inst_data_i                             ,
+    .inst_valid_o                            ,
+    .inst_ready_i                            ,
+    .acc_qaddr_o      ( acc_req_d.addr      ),
+    .acc_qid_o        ( acc_req_d.id        ),
+    .acc_qdata_op_o   ( acc_req_d.data_op   ),
+    .acc_qdata_arga_o ( acc_req_d.data_arga ),
+    .acc_qdata_argb_o ( acc_req_d.data_argb ),
+    .acc_qdata_argc_o ( acc_req_d.data_argc ),
+    .acc_qvalid_o     ( acc_req_d_valid     ),
+    .acc_qready_i     ( acc_req_d_ready     ),
+    .acc_pdata_i      ( acc_resp_q.data     ),
+    .acc_pid_i        ( acc_resp_q.id       ),
+    .acc_perror_i     ( acc_resp_q.error    ),
+    .acc_pvalid_i     ( acc_resp_q_valid    ),
+    .acc_pready_o     ( acc_resp_q_ready    ),
+    .data_qaddr_o     ( data_req_d.addr     ),
+    .data_qwrite_o    ( data_req_d.write    ),
+    .data_qamo_o      ( data_req_d.amo      ),
+    .data_qdata_o     ( data_req_d.data     ),
+    .data_qstrb_o     ( data_req_d.strb     ),
+    .data_qid_o       ( data_req_d.id       ),
+    .data_qvalid_o    ( data_req_d_valid    ),
+    .data_qready_i    ( data_req_d_ready    ),
+    .data_pdata_i     ( data_resp_q.data    ),
+    .data_perror_i    ( data_resp_q.error   ),
+    .data_pid_i       ( data_resp_q.id      ),
+    .data_pvalid_i    ( data_resp_q_valid   ),
+    .data_pready_o    ( data_resp_q_ready   ),
+    .wake_up_sync_i   ( wake_up_sync_i      ),
+    .core_events_o    ( core_events_o       )
   );
-
-  // Assign Snitch data interface
-  assign data_req_d_valid[0] = data_req_snitch_d_valid;
-  assign data_req_d_ready[0] = data_req_snitch_d_ready;
-  assign data_req_d[0] = data_req_snitch_d;
-  assign data_resp_snitch_q = data_resp_q[1];
-  assign data_resp_snitch_q_valid = data_resp_q_valid[1];
-  assign data_resp_snitch_q_ready = data_resp_q_ready[1];
 
   // Cut off-loading request path
   spill_register #(
@@ -161,31 +129,6 @@ module mempool_cc
     .data_o  ( acc_resp_q       )
   );
 
-  // Accelerator Demux Port
-  stream_demux #(
-    .N_OUP ( 5 )
-  ) i_stream_demux_offload (
-    .inp_valid_i  ( acc_req_qvalid_q               ),
-    .inp_ready_o  ( acc_req_qready_q               ),
-    .oup_sel_i    ( acc_req_q.addr[$clog2(5)-1:0]  ),
-    .oup_valid_o  ( {ipu_qvalid, fpu_qvalid}       ),
-    .oup_ready_i  ( {ipu_qready, fpu_qready}       )
-  );
-
-  stream_arbiter #(
-    .DATA_T      ( snitch_pkg::acc_resp_t ),
-    .N_INP       ( 5          )
-  ) i_stream_arbiter_offload (
-    .clk_i       ( clk_i                            ),
-    .rst_ni      ( rst_ni                           ),
-    .inp_data_i  ( {ipu_resp,   fpu_seq      }      ),
-    .inp_valid_i ( {ipu_dvalid, fpu_dvalid   }      ),
-    .inp_ready_o ( {ipu_dready, fpu_dready   }      ),
-    .oup_data_o  ( acc_resp_d        ),
-    .oup_valid_o ( acc_resp_d_valid  ),
-    .oup_ready_i ( acc_resp_d_ready  )
-  );
-
   // Snitch IPU accelerator
   snitch_ipu #(
     .IdWidth ( 5 )
@@ -198,87 +141,14 @@ module mempool_cc
     .acc_qdata_arga_i ( acc_req_q.data_arga ),
     .acc_qdata_argb_i ( acc_req_q.data_argb ),
     .acc_qdata_argc_i ( acc_req_q.data_argc ),
-    .acc_qvalid_i     ( ipu_qvalid          ),
-    .acc_qready_o     ( ipu_qready          ),
-    .acc_pdata_o      ( ipu_resp.data       ),
-    .acc_pid_o        ( ipu_resp.id         ),
-    .acc_perror_o     ( ipu_resp.error      ),
-    .acc_pvalid_o     ( ipu_dvalid          ),
-    .acc_pready_i     ( ipu_dready          )
+    .acc_qvalid_i     ( acc_req_q_valid     ),
+    .acc_qready_o     ( acc_req_q_ready     ),
+    .acc_pdata_o      ( acc_resp_d.data     ),
+    .acc_pid_o        ( acc_resp_d.id       ),
+    .acc_perror_o     ( acc_resp_d.error    ),
+    .acc_pvalid_o     ( acc_resp_d_valid    ),
+    .acc_pready_i     ( acc_resp_d_ready    )
   );
-
-  // Snitch FPU sub-system
-  snitch_fp_ss #(
-    .FPUImplementation      ( '0                     ),
-    .NumFPOutstandingLoads  (  0                     ),
-    .NumFPOutstandingMem    (  0                     ),
-    .NumFPUSequencerInstr   (  0                     ),
-    .NumSsrs                (  0                     ),
-    .SsrRegs                ( '0                     ),
-    .RegisterSequencer      ( 0                      ),
-    .Xfrep                  ( 1                      ),
-    .Xssr                   ( 1                      ),
-    .RVF                    ( RVF                    ),
-    .RVD                    ( RVD                    )
-  ) i_snitch_fp_ss (
-    .clk_i,
-    .rst_i            ( ~rst_ni  ),
-    // pragma translate_off
-    .trace_port_o            ( fpu_trace           ),
-    .sequencer_tracer_port_o ( fpu_sequencer_trace ),
-    // pragma translate_on
-    .acc_qaddr_i             ( acc_req_q.addr        ),
-    .acc_qid_i               ( acc_req_q.id          ),
-    .acc_qdata_op_i          ( acc_req_q.data_op     ),
-    .acc_qdata_arga_i        ( acc_req_q.data_arga   ),
-    .acc_qdata_argb_i        ( acc_req_q.data_argb   ),
-    .acc_qdata_argc_i        ( acc_req_q.data_argc   ),
-    .acc_qvalid_i            ( fpu_qvalid            ),
-    .acc_qready_o            ( fpu_qready            ),
-    .acc_pdata_o             ( fpu_resp.data         ),
-    .acc_pid_o               ( fpu_resp.id           ),
-    .acc_perror_o            ( fpu_resp.error        ),
-    .acc_pvalid_o            ( fpu_dvalid            ),
-    .acc_pready_i            ( fpu_dready            ),
-    .data_qaddr_o            ( data_req_fpu_d.addr   ),
-    .data_qwrite_o           ( data_req_fpu_d.write  ),
-    .data_qamo_o             ( data_req_fpu_d.amo    ),
-    .data_qdata_o            ( data_req_fpu_d.data   ),
-    .data_qstrb_o            ( data_req_fpu_d.strb   ),
-    .data_qid_o              ( data_req_fpu_d.id     ),
-    .data_qvalid_o           ( data_req_fpu_d_valid  ),
-    .data_qready_i           ( data_req_fpu_d_ready  ),
-    .data_pdata_i            ( data_resp_fpu_q.data  ),
-    .data_perror_i           ( data_resp_fpu_q.error ),
-    .data_pid_i              ( data_resp_fpu_q.id    ),
-    .data_pvalid_i           ( data_resp_fpu_q_valid ),
-    .data_pready_o           ( data_resp_fpu_q_ready ),
-    .fpu_rnd_mode_i          ( fpu_rnd_mode          ),
-    .fpu_fmt_mode_i          ( /* Unused */          ),
-    .fpu_status_o            ( fpu_status            ),
-    .ssr_raddr_o             ( /* Unused */          ),
-    .ssr_rdata_i             ( /* Unused */          ),
-    .ssr_rvalid_o            ( /* Unused */          ),
-    .ssr_rready_i            ( /* Unused */          ),
-    .ssr_rdone_o             ( /* Unused */          ),
-    .ssr_waddr_o             ( /* Unused */          ),
-    .ssr_wdata_o             ( /* Unused */          ),
-    .ssr_wvalid_o            ( /* Unused */          ),
-    .ssr_wready_i            ( /* Unused */          ),
-    .ssr_wdone_o             ( /* Unused */          ),
-    .streamctl_done_i        ( /* Unused */          ),
-    .streamctl_valid_i       ( /* Unused */          ),
-    .streamctl_ready_o       ( /* Unused */          ),
-    .core_events_o
-  );
-
-  // Assign FPU data interface
-  assign data_req_d[1] = data_req_fpu_d;
-  assign data_req_d_valid[1] = data_req_fpu_d_valid;
-  assign data_req_d_ready[1] = data_req_fpu_d_ready;
-  assign data_resp_fpu_q = data_resp_q[1];
-  assign data_resp_fpu_q_valid = data_resp_q_valid[1];
-  assign data_resp_fpu_q_ready = data_resp_q_ready[1];
 
   // Cut TCDM data request path
   spill_register #(
@@ -300,8 +170,8 @@ module mempool_cc
     .T      ( snitch_pkg::dresp_t ),
     .Bypass ( !RegisterTCDMResp   )
   ) i_spill_register_tcdm_resp (
-    .clk_i                        ,
-    .rst_ni  ( ~rst_i            ),
+    .clk_i                       ,
+    .rst_ni  ( ~rst_i           ),
     .valid_i ( data_resp_d_valid ),
     .ready_o ( data_resp_d_ready ),
     .data_i  ( data_resp_d       ),
@@ -311,23 +181,20 @@ module mempool_cc
   );
 
   // Assign TCDM data interface
-  genvar idx_TCDMport;
-  for ( idx_TCDMport = 0; idx_TCDMport < NumTCDMConn; idx_TCDMport++) begin
-    assign data_qaddr_o[idx_TCDMport]      = data_req_q[idx_TCDMport].addr;
-    assign data_qwrite_o[idx_TCDMport]     = data_req_q[idx_TCDMport].write;
-    assign data_qamo_o[idx_TCDMport]       = data_req_q[idx_TCDMport].amo;
-    assign data_qdata_o[idx_TCDMport]      = data_req_q[idx_TCDMport].data;
-    assign data_qstrb_o[idx_TCDMport]      = data_req_q[idx_TCDMport].strb;
-    assign data_qid_o[idx_TCDMport]        = data_req_q[idx_TCDMport].id;
-    assign data_qvalid_o[idx_TCDMport]     = data_req_q_valid[idx_TCDMport];
-    assign data_req_q_ready[idx_TCDMport] = data_qready_i[idx_TCDMport];
-    assign data_resp_d[idx_TCDMport].data  = data_pdata_i[idx_TCDMport];
-    assign data_resp_d[idx_TCDMport].id    = data_pid_i[idx_TCDMport];
-    assign data_resp_d[idx_TCDMport].write = 'x; // Don't care here
-    assign data_resp_d[idx_TCDMport].error = data_perror_i[idx_TCDMport];
-    assign data_resp_d_valid[idx_TCDMport] = data_pvalid_i[idx_TCDMport];
-    assign data_pready_o[idx_TCDMport]     = data_resp_d_ready[idx_TCDMport];
-  end
+  assign data_qaddr_o      = data_req_q.addr;
+  assign data_qwrite_o     = data_req_q.write;
+  assign data_qamo_o       = data_req_q.amo;
+  assign data_qdata_o      = data_req_q.data;
+  assign data_qstrb_o      = data_req_q.strb;
+  assign data_qid_o        = data_req_q.id;
+  assign data_qvalid_o     = data_req_q_valid;
+  assign data_req_q_ready  = data_qready_i;
+  assign data_resp_d.data  = data_pdata_i;
+  assign data_resp_d.id    = data_pid_i;
+  assign data_resp_d.write = 'x; // Don't care here
+  assign data_resp_d.error = data_perror_i;
+  assign data_resp_d_valid = data_pvalid_i;
+  assign data_pready_o     = data_resp_d_ready;
 
   // --------------------------
   // Tracer
