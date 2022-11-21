@@ -67,4 +67,4 @@ xqueue_size ?= 0
 xpulpimg ?= 1
 
 # FPU is deactivated by default
-fpu ?= 0
+zfinx_rv ?= 1
